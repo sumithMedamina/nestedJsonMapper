@@ -1,0 +1,258 @@
+import React, { useState, useContext, useEffect } from 'react';
+import { DndProvider, useDrag, useDrop } from 'react-dnd';
+import { HTML5Backend } from 'react-dnd-html5-backend';
+import { ArcherContainer, ArcherElement } from 'react-archer';
+import 'bootstrap/dist/css/bootstrap.min.css';
+import JsonContext from './JsonContext';
+
+const ItemTypes = {
+  KEY: 'key',
+};
+
+const DraggableKey = ({ id, name, children }) => {
+  const [{ isDragging }, drag] = useDrag(() => ({
+    type: ItemTypes.KEY,
+    item: { id, name },
+    collect: (monitor) => ({
+      isDragging: !!monitor.isDragging(),
+    }),
+  }));
+
+  return (
+    <div ref={drag} style={{ opacity: isDragging ? 0.5 : 1 }} className="list-group-item">
+      {children}
+    </div>
+  );
+};
+
+const DroppableKey = ({ id, onDrop, children }) => {
+  const [{ isOver }, drop] = useDrop(() => ({
+    accept: ItemTypes.KEY,
+    drop: (item) => onDrop(item, id),
+    collect: (monitor) => ({
+      isOver: !!monitor.isOver(),
+    }),
+  }));
+
+  return (
+    <div ref={drop} style={{ backgroundColor: isOver ? 'lightyellow' : 'inherit' }} className="list-group-item">
+      {children}
+    </div>
+  );
+};
+
+const JsonMapper = () => {
+  const { sourceJson, targetJson } = useContext(JsonContext);
+  const [mappings, setMappings] = useState([]);
+  const [updatedSourceJson, setUpdatedSourceJson] = useState('');
+
+  const applyMapping = (obj, mappings) => {
+    const newObj = {};
+
+    Object.keys(obj).forEach(key => {
+      const value = obj[key];
+      const mapping = mappings.find(m => m.source === key || m.source.startsWith(`${key}.`));
+
+      if (typeof value === 'object' && value !== null && !Array.isArray(value)) {
+        newObj[mapping ? mapping.target : key] = applyMapping(value, mappings.map(m => ({
+          ...m,
+          source: m.source.startsWith(`${key}.`) ? m.source.replace(`${key}.`, '') : m.source
+        })));
+      } else {
+        if (mapping && mapping.source === key) {
+          newObj[mapping.target] = value;
+        } else {
+          newObj[key] = value;
+        }
+      }
+    });
+
+    return newObj;
+  };
+
+  useEffect(() => {
+    if (sourceJson && sourceJson.length > 0) {
+      const updatedJson = sourceJson.map(obj => applyMapping(obj, mappings));
+      setUpdatedSourceJson(JSON.stringify(updatedJson, null, 2));
+    }
+  }, [mappings, sourceJson]);
+
+  const handleDrop = (sourceItem, targetKey) => {
+    setMappings((prevMappings) => {
+      const existingMapping = prevMappings.find(mapping => mapping.source === sourceItem.name);
+      if (existingMapping) {
+        return prevMappings.map(mapping => 
+          mapping.source === sourceItem.name ? { ...mapping, target: targetKey } : mapping
+        );
+      }
+      return [...prevMappings, { source: sourceItem.name, target: targetKey }];
+    });
+  };
+
+  const handleCancelMapping = (sourceKey) => {
+    setMappings(mappings.filter(mapping => mapping.source !== sourceKey));
+  };
+
+  const renderObject = (obj, isSource = false, prefix = '') => {
+    if (!obj) {
+      return null;
+    }
+
+    return (
+      <ul className="list-group">
+        {Object.entries(obj).map(([key, value]) => {
+          const fullKey = prefix ? `${prefix}.${key}` : key;
+          if (isSource) {
+            return (
+              <ArcherElement
+                key={fullKey}
+                id={`source-${fullKey}`}
+                relations={mappings.filter(mapping => mapping.source === fullKey).map(mapping => ({
+                  targetId: `target-${mapping.target}`,
+                  targetAnchor: 'right',
+                  sourceAnchor: 'left',
+                  style: { strokeColor: 'black', strokeWidth: 1 },
+                }))}
+              >
+                <DraggableKey id={fullKey} name={fullKey}>
+                  <span className="fw-bold">{fullKey}:</span> {JSON.stringify(value)}
+                  {mappings.find(mapping => mapping.source === fullKey) && (
+                    <button
+                      className="btn btn-sm btn-danger ms-2"
+                      onClick={() => handleCancelMapping(fullKey)}
+                    >
+                      Cancel
+                    </button>
+                  )}
+                  {typeof value === 'object' && value !== null && renderObject(value, isSource, fullKey)}
+                </DraggableKey>
+              </ArcherElement>
+            );
+          } else {
+            return (
+              <ArcherElement
+                key={fullKey}
+                id={`target-${fullKey}`}
+                relations={mappings.filter(mapping => mapping.target === fullKey).map(mapping => ({
+                  targetId: `source-${mapping.source}`,
+                  targetAnchor: 'right',
+                  sourceAnchor: 'left',
+                  style: { strokeColor: 'black', strokeWidth: 1 },
+                }))}
+              >
+                <DroppableKey id={fullKey} onDrop={handleDrop}>
+                  <span className="fw-bold">{fullKey}:</span> {JSON.stringify(value)}
+                  {typeof value === 'object' && value !== null && renderObject(value, isSource, fullKey)}
+                </DroppableKey>
+              </ArcherElement>
+            );
+          }
+        })}
+      </ul>
+    );
+  };
+
+  const renderMappings = () => {
+    return mappings.map((mapping, index) => (
+      <div key={index} className="d-flex align-items-center mb-2">
+        <span>{mapping.source} </span>
+        <span className="mx-2">→</span>
+        <span>{mapping.target}</span>
+        <button
+          className="btn btn-sm btn-danger ms-2"
+          onClick={() => handleCancelMapping(mapping.source)}
+        >
+          Cancel
+        </button>
+      </div>
+    ));
+  };
+
+  const saveUpdatedJson = () => {
+    const jsonData = JSON.parse(updatedSourceJson);
+
+    fetch('http://localhost:5000/api/items', {
+      method: 'POST',
+      headers: {
+        'Content-Type': 'application/json',
+      },
+      body: JSON.stringify(jsonData),
+    })
+      .then((response) => {
+        if (!response.ok) {
+          throw new Error('Network response was not ok');
+        }
+        return response.json();
+      })
+      .then((data) => {
+        console.log('Data saved successfully:', data);
+      })
+      .catch((error) => {
+        console.error('Error saving data:', error);
+      });
+  };
+
+  return (
+    <DndProvider backend={HTML5Backend}>
+      <ArcherContainer strokeColor="black">
+        <div className="container mt-4">
+          <div className="row">
+            <div className="col-md-6">
+              <div className="card">
+                <div className="card-header bg-primary text-white">
+                  <h3>Source JSON</h3>
+                </div>
+                <div className="card-body">
+                  <ArcherElement id="source-json">
+                    {renderObject(sourceJson && sourceJson[0], true)}
+                  </ArcherElement>
+                </div>
+              </div>
+            </div>
+            <div className="col-md-6">
+              <div className="card">
+                <div className="card-header bg-success text-white">
+                  <h3>Target JSON</h3>
+                </div>
+                <div className="card-body">
+                  {renderObject(targetJson)}
+                </div>
+              </div>
+            </div>
+          </div>
+          <div className="row mt-4">
+            <div className="col-12 text-center">
+              <button className="btn btn-primary" onClick={saveUpdatedJson}>
+                Save Updated JSON
+              </button>
+            </div>
+          </div>
+          <div className="row mt-4">
+            <div className="col-12">
+              <div className="card">
+                <div className="card-header bg-warning text-white">
+                  <h3>Mappings</h3>
+                </div>
+                <div className="card-body">{renderMappings()}</div>
+              </div>
+            </div>
+          </div>
+          <div className="row mt-4">
+            <div className="col-12">
+              <div className="card">
+                <div className="card-header bg-info text-white">
+                  <h3>Updated Source JSON</h3>
+                </div>
+                <div className="card-body">
+                  <pre>{updatedSourceJson}</pre>
+                </div>
+              </div>
+            </div>
+          </div>
+        </div>
+      </ArcherContainer>
+    </DndProvider>
+  );
+};
+
+export default JsonMapper;
